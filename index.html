@@ -271,9 +271,14 @@
     .brand h1{font-size:19px;letter-spacing:.06em}
     .kicker{font-size:9.5px;letter-spacing:.2em}
     .actions{width:100%;margin-left:0}
-    .actions .btn{flex:1;padding:9px 8px;font-size:13px}
+    /* 不平均拉伸：按鈕數量會變（揭曉後「預覽」會收起來），
+       硬拉的話最後一列常常只剩一顆被拉成通欄，很難看。用自然寬度換行就好。 */
+    .actions .btn{flex:0 1 auto;padding:9px 12px;font-size:13px}
     .composer input{font-size:16px;padding:13px 14px}
     .composer form .btn{padding:0 18px}
+    /* 固定 150px 在手機上會被擠成看不見內容，讓它吃掉該列剩下的寬度 */
+    .admin input{flex:1 1 90px;width:auto;min-width:0}
+    .admin .grow{margin-left:0}
     .qr{left:12px;right:12px;width:auto}
   }
   /* 觸控裝置（平板／手機）：把點擊區拉到手指按得準的高度。
@@ -308,6 +313,7 @@
       <button class="btn primary reveal" id="revealBtn">一鍵揭曉</button>
       <button class="btn" id="previewBtn">預覽</button>
       <button class="btn" id="toggleQr">QR Code</button>
+      <button class="btn" id="exportBtn">下載 Excel</button>
       <button class="btn" id="projectBtn">投影模式</button>
     </div>
   </header>
@@ -340,11 +346,11 @@
     <div class="suggest" id="suggestPanel" hidden>
       <div class="suggest-head">
         <span class="suggest-title">字數比較多，先幫你抓出關鍵字</span>
-        <span class="suggest-hint">點一下可以取消不要的，確認後再按加入</span>
+        <span class="suggest-hint">點一下可以取消不要的。帶入輸入框後還能修改，按「加入」才會送出</span>
       </div>
       <div class="chips" id="suggestChips"></div>
       <div class="suggest-actions">
-        <button class="btn primary" id="suggestAdd" type="button">加入</button>
+        <button class="btn primary" id="suggestAdd" type="button">帶入輸入框</button>
         <button class="btn ghost" id="suggestCancel" type="button">取消</button>
         <span class="suggest-count" id="suggestCount"></span>
       </div>
@@ -813,7 +819,7 @@ function scheduleRender(highlight){
    ============================================================ */
 function addLocal(word){
   var id = 'L' + Date.now() + Math.random().toString(36).slice(2, 7);
-  entries.push({ id: id, word: word });
+  entries.push({ id: id, word: word, created_at: new Date().toISOString() });
   return id;
 }
 
@@ -837,7 +843,7 @@ function submitList(list){
 
   if (online){
     var rows = parts.map(function(w){ return { room: room, word: w }; });
-    return sb.from(TABLE).insert(rows).select('id,word').then(function(res){
+    return sb.from(TABLE).insert(rows).select('id,word,created_at').then(function(res){
       if (res.error){ toast('送出失敗：' + res.error.message, true); return; }
       (res.data || []).forEach(function(r){
         if (!entries.some(function(e){ return String(e.id) === String(r.id); })) entries.push(r);
@@ -933,7 +939,7 @@ function fetchRoomState(){
 function fetchAll(){
   // 由新到舊取最多 MAX_ROWS 筆：萬一某個主題累積超過上限，
   // 留下的會是最近的投稿，而不是被凍結在最早的那一批。
-  return sb.from(TABLE).select('id,word')
+  return sb.from(TABLE).select('id,word,created_at')
     .eq('room', room).order('id', { ascending: false }).limit(MAX_ROWS)
     .then(function(res){
       if (res.error) throw res.error;
@@ -967,7 +973,7 @@ function connect(){
         function(payload){
           var r = payload['new'];
           if (!r || entries.some(function(e){ return String(e.id) === String(r.id); })) return;
-          entries.push({ id: r.id, word: r.word });
+          entries.push({ id: r.id, word: r.word, created_at: r.created_at });
           refreshUndo();
           scheduleRender(new Set([r.word]));
         })
@@ -983,6 +989,258 @@ function connect(){
         else if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT') setStatus('同步中斷，重新整理可修復', false);
       });
     setStatus('已連線 · 即時同步', true);
+  });
+}
+
+/* ============================================================
+   匯出 Excel（.xlsx）
+
+   xlsx 其實就是一包 ZIP 裝著幾個 XML。自己寫比拉 SheetJS 進來划算太多
+   ——那個函式庫壓縮後將近 1MB，而這裡只需要「不壓縮」的 ZIP 加四個
+   固定格式的 XML，兩百行就搞定，而且不必為了下載一份成績單多載一整包。
+   ============================================================ */
+var CRC_TABLE = (function(){
+  var tbl = new Uint32Array(256);
+  for (var n = 0; n < 256; n++){
+    var c = n;
+    for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    tbl[n] = c >>> 0;
+  }
+  return tbl;
+})();
+
+function crc32(bytes){
+  var crc = 0xFFFFFFFF;
+  for (var i = 0; i < bytes.length; i++){
+    crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+/* 只做 store（不壓縮）的 ZIP —— xlsx 完全接受，也省掉實作 deflate */
+function makeZip(files){
+  var enc = new TextEncoder();
+  var parts = [], central = [], offset = 0;
+
+  files.forEach(function(f){
+    var name = enc.encode(f.name);
+    var data = enc.encode(f.xml);
+    var crc = crc32(data);
+
+    var lh = new Uint8Array(30 + name.length);
+    var d = new DataView(lh.buffer);
+    d.setUint32(0, 0x04034b50, true);
+    d.setUint16(4, 20, true);
+    d.setUint16(6, 0x0800, true);   // 檔名用 UTF-8
+    d.setUint16(8, 0, true);        // 不壓縮
+    d.setUint16(10, 0, true);
+    d.setUint16(12, 0x0021, true);  // 1980-01-01
+    d.setUint32(14, crc, true);
+    d.setUint32(18, data.length, true);
+    d.setUint32(22, data.length, true);
+    d.setUint16(26, name.length, true);
+    d.setUint16(28, 0, true);
+    lh.set(name, 30);
+    parts.push(lh, data);
+
+    var cd = new Uint8Array(46 + name.length);
+    var c = new DataView(cd.buffer);
+    c.setUint32(0, 0x02014b50, true);
+    c.setUint16(4, 20, true);
+    c.setUint16(6, 20, true);
+    c.setUint16(8, 0x0800, true);
+    c.setUint16(10, 0, true);
+    c.setUint16(12, 0, true);
+    c.setUint16(14, 0x0021, true);
+    c.setUint32(16, crc, true);
+    c.setUint32(20, data.length, true);
+    c.setUint32(24, data.length, true);
+    c.setUint16(28, name.length, true);
+    c.setUint32(42, offset, true);
+    cd.set(name, 46);
+    central.push(cd);
+
+    offset += lh.length + data.length;
+  });
+
+  var cdSize = central.reduce(function(a, b){ return a + b.length; }, 0);
+  var eocd = new Uint8Array(22);
+  var e = new DataView(eocd.buffer);
+  e.setUint32(0, 0x06054b50, true);
+  e.setUint16(8, files.length, true);
+  e.setUint16(10, files.length, true);
+  e.setUint32(12, cdSize, true);
+  e.setUint32(16, offset, true);
+
+  return new Blob(parts.concat(central, [eocd]),
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+function xmlEscape(s){
+  return String(s).replace(/[&<>"']/g, function(ch){
+    return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&apos;' }[ch];
+  }).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');   // 控制字元會讓 Excel 拒開
+}
+
+function colName(i){
+  var s = '';
+  i += 1;
+  while (i > 0){
+    var r = (i - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    i = Math.floor((i - 1) / 26);
+  }
+  return s;
+}
+
+/* rows：二維陣列，數字寫成數值格、其餘寫成文字 */
+function sheetXml(rows){
+  var body = rows.map(function(row, r){
+    var cells = row.map(function(v, c){
+      var ref = colName(c) + (r + 1);
+      if (typeof v === 'number' && isFinite(v)){
+        return '<c r="' + ref + '"><v>' + v + '</v></c>';
+      }
+      return '<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' +
+             xmlEscape(v == null ? '' : v) + '</t></is></c>';
+    }).join('');
+    return '<row r="' + (r + 1) + '">' + cells + '</row>';
+  }).join('');
+
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<sheetData>' + body + '</sheetData></worksheet>';
+}
+
+function buildWorkbook(sheets){
+  var files = [];
+
+  files.push({ name: '[Content_Types].xml', xml:
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    sheets.map(function(s, i){
+      return '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ' +
+             'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+    }).join('') +
+    '</Types>' });
+
+  files.push({ name: '_rels/.rels', xml:
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    '</Relationships>' });
+
+  files.push({ name: 'xl/workbook.xml', xml:
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+    sheets.map(function(s, i){
+      return '<sheet name="' + xmlEscape(s.name) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>';
+    }).join('') +
+    '</sheets></workbook>' });
+
+  files.push({ name: 'xl/_rels/workbook.xml.rels', xml:
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    sheets.map(function(s, i){
+      return '<Relationship Id="rId' + (i + 1) + '" ' +
+             'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ' +
+             'Target="worksheets/sheet' + (i + 1) + '.xml"/>';
+    }).join('') +
+    '</Relationships>' });
+
+  sheets.forEach(function(s, i){
+    files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', xml: sheetXml(s.rows) });
+  });
+
+  return makeZip(files);
+}
+
+function localTime(iso){
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d)) return String(iso);
+  function p(n){ return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+/* 匯出時把整個主題撈完，不受畫面那 1000 筆上限影響 */
+function fetchEverything(){
+  if (!online) return Promise.resolve(entries.slice());
+  var all = [], page = 0, SIZE = 1000;
+  function step(){
+    return sb.from(TABLE).select('id,word,created_at')
+      .eq('room', room).order('id', { ascending: true })
+      .range(page * SIZE, page * SIZE + SIZE - 1)
+      .then(function(res){
+        if (res.error) throw res.error;
+        var rows = res.data || [];
+        all = all.concat(rows);
+        if (rows.length < SIZE) return all;
+        page++;
+        return step();
+      });
+  }
+  return step();
+}
+
+function exportExcel(){
+  var btn = $('exportBtn');
+  btn.disabled = true;
+  var original = btn.textContent;
+  btn.textContent = '整理中…';
+
+  fetchEverything().then(function(rows){
+    if (!rows.length){
+      toast('這個主題還沒有資料可以下載', true);
+      return;
+    }
+
+    var counts = new Map();
+    rows.forEach(function(r){ counts.set(r.word, (counts.get(r.word) || 0) + 1); });
+    var ranked = [];
+    counts.forEach(function(n, w){ ranked.push([w, n]); });
+    ranked.sort(function(a, b){ return b[1] - a[1] || a[0].localeCompare(b[0], 'zh-Hant'); });
+
+    var summary = [['主題', room], ['匯出時間', localTime(new Date().toISOString())],
+                   ['投稿總數', rows.length], ['不同詞彙數', counts.size], [],
+                   ['名次', '詞彙', '票數', '佔比']];
+    ranked.forEach(function(p, i){
+      summary.push([i + 1, p[0], p[1], Math.round(p[1] / rows.length * 1000) / 10 + '%']);
+    });
+
+    var raw = [['序號', '詞彙', '送出時間']];
+    rows.forEach(function(r, i){ raw.push([i + 1, r.word, localTime(r.created_at)]); });
+
+    var blob = buildWorkbook([
+      { name: '詞彙統計', rows: summary },
+      { name: '原始資料', rows: raw }
+    ]);
+
+    var now = new Date();
+    function p(n){ return (n < 10 ? '0' : '') + n; }
+    var stamp = now.getFullYear() + p(now.getMonth() + 1) + p(now.getDate()) +
+                '_' + p(now.getHours()) + p(now.getMinutes());
+    var safeRoom = room.replace(/[\\/:*?"<>|]/g, '_');
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = '文字雲_' + safeRoom + '_' + stamp + '.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+
+    toast('已下載 ' + rows.length + ' 筆資料');
+  }).catch(function(err){
+    toast('下載失敗：' + (err && err.message ? err.message : err), true);
+  }).then(function(){
+    btn.disabled = false;
+    btn.textContent = original;
   });
 }
 
@@ -1039,6 +1297,7 @@ function drawQr(){
 /* ---------- 關鍵字確認面板 ---------- */
 var suggested = [];       // [{word, on}]
 var suggestSource = '';   // 原始輸入，按取消時還回輸入框
+var confirmedText = '';   // 剛從關鍵字面板帶入輸入框的那一串，避免再被拆一次
 
 function renderChips(){
   var box = $('suggestChips');
@@ -1053,7 +1312,7 @@ function renderChips(){
     box.appendChild(b);
   });
   var n = suggested.filter(function(i){ return i.on; }).length;
-  $('suggestAdd').textContent = n ? ('加入 ' + n + ' 個詞') : '加入';
+  $('suggestAdd').textContent = n ? ('帶入 ' + n + ' 個詞') : '帶入輸入框';
   $('suggestAdd').disabled = n === 0;
   $('suggestCount').textContent = '共抓到 ' + suggested.length + ' 個';
 }
@@ -1071,12 +1330,19 @@ function closeSuggest(){
   suggestSource = '';
 }
 
+/* 挑好的關鍵字先回到輸入框，讓使用者再看一眼、還能改，
+   自己按「加入」才真的進文字雲。 */
 $('suggestAdd').addEventListener('click', function(){
   var picked = suggested.filter(function(i){ return i.on; }).map(function(i){ return i.word; });
   if (!picked.length) return;
+  var text = picked.join('，');
   closeSuggest();
-  submitList(picked);
-  $('wordInput').focus();
+  var input = $('wordInput');
+  input.value = text;
+  confirmedText = text;   // 記住這串是剛確認過的，按加入時不要又被拆一次
+  input.focus();
+  try { input.setSelectionRange(text.length, text.length); } catch(e){}
+  toast('已帶入輸入框，確認後按「加入」送出');
 });
 
 $('suggestCancel').addEventListener('click', function(){
@@ -1091,10 +1357,12 @@ $('wordForm').addEventListener('submit', function(e){
   var val = input.value.trim();
   if (!val){ input.focus(); return; }
 
-  // 逗號分隔的詞直接送；某一段太長才先拆成關鍵字讓使用者確認
-  if (!needsExtraction(val)){
+  // 逗號分隔的詞直接送；某一段太長才先拆成關鍵字讓使用者確認。
+  // 已經在關鍵字面板確認過、原封不動帶回來的那一串也直接送，不要重複拆。
+  if (val === confirmedText || !needsExtraction(val)){
     input.value = '';
     input.focus();
+    confirmedText = '';
     closeSuggest();
     submitWords(val);
     return;
@@ -1112,6 +1380,7 @@ $('wordForm').addEventListener('submit', function(e){
 if (isAdmin){
   $('revealBtn').addEventListener('click', function(){ setRevealed(!revealed); });
   $('previewBtn').addEventListener('click', function(){ preview = !preview; syncView(); });
+  $('exportBtn').addEventListener('click', exportExcel);
 }
 
 $('toggleQr').addEventListener('click', function(){
