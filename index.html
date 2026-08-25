@@ -159,6 +159,33 @@
   .link:hover{color:var(--brand-deep)}
   .link:disabled{opacity:.4;cursor:not-allowed;text-decoration:none;color:var(--ink-faint)}
 
+  /* ---------- 關鍵字確認面板 ---------- */
+  .suggest{
+    margin-bottom:12px;padding:15px 16px 14px;border-radius:8px;
+    background:var(--paper-2);border:1px solid var(--line);
+    box-shadow:0 14px 34px -26px rgba(80,52,36,.75);
+  }
+  .suggest[hidden]{display:none}
+  .suggest-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+  .suggest-title{font-family:var(--serif);font-size:15.5px;font-weight:700;
+    color:var(--ink);letter-spacing:.06em}
+  .suggest-hint{font-size:12.5px;color:var(--ink-soft)}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;max-height:34vh;overflow-y:auto}
+  .chip-word{
+    appearance:none;font-family:var(--serif);font-size:15px;font-weight:700;cursor:pointer;
+    padding:8px 15px;border-radius:999px;letter-spacing:.04em;
+    background:var(--brand);border:1px solid var(--brand);color:#fff;
+    transition:background .16s,color .16s,border-color .16s;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .chip-word:hover{background:var(--brand-deep);border-color:var(--brand-deep)}
+  .chip-word.off{background:transparent;border-color:var(--line);color:var(--ink-faint);
+    text-decoration:line-through}
+  .chip-word.off:hover{background:var(--paper);border-color:#D2C3AC;color:var(--ink-soft)}
+  .suggest-actions{display:flex;gap:9px;align-items:center}
+  .suggest-actions .btn{padding:9px 20px}
+  .suggest-count{margin-left:auto;font-size:12.5px;color:var(--ink-soft)}
+
   /* ---------- QR 面板 ---------- */
   .qr{
     position:fixed;right:clamp(12px,2.6vw,30px);bottom:clamp(12px,2.6vw,30px);z-index:40;
@@ -310,8 +337,21 @@
       <button class="btn" id="roomGo">切換主題</button>
       <button class="btn danger grow" id="clearBtn">清空這個主題</button>
     </div>
+    <div class="suggest" id="suggestPanel" hidden>
+      <div class="suggest-head">
+        <span class="suggest-title">從你的文字裡抓到這些關鍵字</span>
+        <span class="suggest-hint">點一下可以取消不要的，確認後再按加入</span>
+      </div>
+      <div class="chips" id="suggestChips"></div>
+      <div class="suggest-actions">
+        <button class="btn primary" id="suggestAdd" type="button">加入</button>
+        <button class="btn ghost" id="suggestCancel" type="button">取消</button>
+        <span class="suggest-count" id="suggestCount"></span>
+      </div>
+    </div>
+
     <form id="wordForm" autocomplete="off">
-      <input id="wordInput" maxlength="30" placeholder="輸入一個詞，按 Enter 送出（可用逗號一次送多個）" enterkeyhint="send">
+      <input id="wordInput" maxlength="200" placeholder="輸入一個詞，或直接打一段話讓系統抓關鍵字" enterkeyhint="send">
       <button class="btn primary" type="submit">加入</button>
     </form>
     <div class="metabar">
@@ -356,6 +396,8 @@ var TABLE        = 'wordcloud_entries';
 var ROOMS        = 'wordcloud_rooms';   // 每個主題一列，存「揭曉了沒」
 var MAX_WORDS    = 200;   // 畫面上最多嘗試排入幾個「不同的詞」
 var MAX_ROWS     = 1000;  // 一個主題最多讀幾筆（PostgREST 單次上限就是 1000）
+var MAX_SUGGEST  = 20;    // 一段文字最多拆出幾個關鍵字
+var MAX_BATCH    = 20;    // 一次最多送出幾個詞
 
 /* 配色分兩層：最熱門的詞用品牌紅家族領銜，其餘用同一套暖色系陪襯。
    顏色由詞彙 hash 決定，所以同一個詞重排時不會變色 —— 除非它的熱度晉升到領銜層。 */
@@ -433,6 +475,120 @@ function refreshUndo(){
 }
 
 /* ============================================================
+   把一段文字拆成關鍵字
+   斷詞用瀏覽器內建的 Intl.Segmenter，不必外掛任何函式庫。
+   ============================================================ */
+var STOPWORDS = (function(){
+  var zh = '的 了 是 在 和 與 及 或 或者 也 都 就 而 但 但是 卻 很 太 更 最 不 沒 沒有 有 我 你 妳 他 她 它 牠 我們 ' +
+    '你們 他們 這 那 這個 那個 這些 那些 這樣 那樣 什麼 怎麼 為什麼 因為 所以 如果 雖然 然後 還有 還是 一個 ' +
+    '一種 一些 一直 一定 可以 可能 應該 需要 覺得 認為 知道 說 對 把 被 讓 給 從 到 向 往 上 下 中 裡 外 前 後 ' +
+    '之 其 此 各 每 才 再 又 已 已經 正在 曾經 常常 總是 非常 比較 有點 一點 大家 自己 別人 東西 事情 時候 ' +
+    '地方 樣子 方面 因此 而且 並且 以及 於 由 用 為 之後 之前 的話 吧 呢 嗎 啊 喔 唷 耶 啦 哦 真的 好像 其實 ' +
+    '的是 能夠 進行 想要 去 跟 會 要 能 想 做 來 過 著 們 個 很多 一樣 這裡 那裡 現在 今天 然而 不過 只是 就是';
+  var en = 'the a an and or but of to in on at for with is are was were be been being it its this that these those ' +
+    'i you he she we they them my your his her our their as by from not no do does did done have has had can could ' +
+    'should would will shall may might must if then than so such very more most much many some any all each every ' +
+    'other another same own just only also too now here there when where what which who whom how why about into ' +
+    'over under again further once because while during before after above below between both few nor own s t';
+  var set = new Set();
+  (zh + ' ' + en).split(/\s+/).forEach(function(w){ if (w) set.add(w.toLowerCase()); });
+  return set;
+})();
+
+var CJK_RE = /^[㐀-䶿一-鿿豈-﫿]+$/;
+var HAS_LETTER_RE = /[㐀-䶿一-鿿豈-﫿A-Za-z]/;
+
+/* Segmenter 會把「閱讀理解」切成「閱讀」「理解」，要黏回去。
+
+   做法是找出在原文中真正相鄰（中間沒有標點、空白或停用詞）的中文詞串：
+   整串 4 個字以內就合成一個複合詞，超過就完全不黏。
+
+   關鍵是「不做半套合併」—— 早期版本會貪婪地黏到滿 4 個字就停，
+   「培養批判思考」因此變成「培養批判」＋落單的「思考」，比不黏還糟。
+   只有落單的單字會被黏在一起，否則它們會被後面的單字過濾器丟掉。 */
+var MERGE_MAX = 4;
+
+function mergeAdjacent(items){
+  var out = [], i = 0;
+  while (i < items.length){
+    var j = i, total = 0;
+    while (j < items.length && CJK_RE.test(items[j].text) &&
+           (j === i || items[j].start === items[j - 1].end)){
+      total += items[j].text.length;
+      j++;
+    }
+
+    if (j - i <= 1){ out.push(items[i].text); i++; continue; }
+
+    if (total <= MERGE_MAX){
+      var joined = '';
+      for (var k = i; k < j; k++) joined += items[k].text;
+      out.push(joined);
+    } else {
+      var buf = '';
+      for (var m = i; m < j; m++){
+        var t = items[m].text;
+        if (t.length === 1){ buf += t; continue; }
+        if (buf){ out.push(buf); buf = ''; }
+        out.push(t);
+      }
+      if (buf) out.push(buf);
+    }
+    i = j;
+  }
+  return out;
+}
+
+function extractKeywords(raw){
+  var text = String(raw || '').trim();
+  if (!text) return [];
+
+  var pieces = [];
+  if (window.Intl && Intl.Segmenter){
+    var seg = new Intl.Segmenter('zh-Hant', { granularity: 'word' });
+    Array.from(seg.segment(text)).forEach(function(s){
+      if (!s.isWordLike) return;
+      var w = s.segment.trim();
+      if (!w || STOPWORDS.has(w.toLowerCase())) return;
+      pieces.push({ text: w, start: s.index, end: s.index + s.segment.length });
+    });
+  } else {
+    // 舊瀏覽器沒有 Segmenter：退而求其次，只靠標點與空白切
+    var pos = 0;
+    text.split(/([\s,，、。．.!！?？;；:：「」『』（）()\[\]【】—…~～\-_/\\|"'`]+)/).forEach(function(chunk){
+      var start = pos; pos += chunk.length;
+      var w = chunk.trim();
+      if (!w || STOPWORDS.has(w.toLowerCase())) return;
+      pieces.push({ text: w, start: start, end: start + chunk.length });
+    });
+  }
+
+  var merged = mergeAdjacent(pieces);
+  var out = [], seen = new Set();
+  merged.forEach(function(w){
+    w = w.trim();
+    if (!w || w.length > 30) return;
+    if (!HAS_LETTER_RE.test(w)) return;                 // 純數字、純標點不要
+    if (w.length === 1 && CJK_RE.test(w)) return;       // 落單的單字通常不成詞
+    if (STOPWORDS.has(w.toLowerCase())) return;         // 合併後可能又變成停用詞
+    var key = w.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(w);
+  });
+  return out.slice(0, MAX_SUGGEST);
+}
+
+/* 短短一個詞就直接送，不要多一道確認拖慢最常見的情況。
+   中文詞通常 2–5 個字，更長的多半是一句話（「我覺得很重要」），那就該拆。 */
+function isSimpleTerm(raw){
+  var t = raw.trim();
+  if (!t) return false;
+  if (/[\s,，、。．.!！?？;；:：]/.test(t)) return false;
+  return CJK_RE.test(t) ? t.length <= 5 : t.length <= 20;
+}
+
+/* ============================================================
    排版：由大到小，沿阿基米德螺線找不重疊的位置
    ============================================================ */
 /* 字重跟著票數走：越熱門的詞越粗，做出刊物標題的層次感。
@@ -462,7 +618,7 @@ function hits(box, placed){
   return false;
 }
 
-function layout(list, W, H, maxSize, minSize){
+function layout(list, W, H, maxSize, minSize, edge){
   var placed = [], result = [];
   var maxN = list[0].n, minN = list[list.length - 1].n;
   var span = Math.max(1, maxN - minN);
@@ -482,7 +638,7 @@ function layout(list, W, H, maxSize, minSize){
       var s = size * (attempt === 0 ? 1 : (attempt === 1 ? 0.78 : 0.58));
       if (s < 10) break;
       var m = measure(item.text, s, vertical, weight);
-      if (m.w > W - 4 || m.h > H - 4) continue;
+      if (m.w > W - edge * 2 || m.h > H - edge * 2) continue;
 
       for (var step = 0; step < 5200; step++){
         var ang = step * 0.30;
@@ -490,7 +646,7 @@ function layout(list, W, H, maxSize, minSize){
         if (r > maxR * 1.2) break;
         var x = cx + r * Math.cos(ang) * (aspect > 1 ? aspect * 0.92 : 1) - m.w / 2;
         var y = cy + r * Math.sin(ang) * (aspect < 1 ? (1 / aspect) * 0.92 : 1) - m.h / 2;
-        if (x < 2 || y < 2 || x + m.w > W - 2 || y + m.h > H - 2) continue;
+        if (x < edge || y < edge || x + m.w > W - edge || y + m.h > H - edge) continue;
         var box = { x: x, y: y, w: m.w, h: m.h };
         if (!hits(box, placed)){
           placed.push(box);
@@ -559,17 +715,20 @@ function render(highlight){
   var W = cloudEl.clientWidth, H = cloudEl.clientHeight;
   if (W < 40 || H < 40) return;
 
-  // 依畫布大小與詞數推估字級；放不下就整體縮小重排
-  var base = Math.sqrt((W * H) / Math.max(10, list.length));
-  var maxSize = clamp(base * 1.05, 26, Math.min(W * 0.44, H * 0.40));
+  // 四周留白，別讓字貼著框線。字級也依「扣掉留白後」的面積推估。
+  var edge = clamp(Math.min(W, H) * 0.055, 16, 48);
+  var iw = W - edge * 2, ih = H - edge * 2;
+
+  var base = Math.sqrt((iw * ih) / Math.max(10, list.length));
+  var maxSize = clamp(base * 1.05, 26, Math.min(iw * 0.46, ih * 0.42));
   var minSize = clamp(base * 0.28, 12, maxSize * 0.42);
 
-  var out = layout(list, W, H, maxSize, minSize);
+  var out = layout(list, W, H, maxSize, minSize, edge);
   var tries = 0;
   while (out.length < list.length && tries < 3){
     maxSize *= 0.80;
     minSize = Math.max(11, minSize * 0.86);
-    out = layout(list, W, H, maxSize, minSize);
+    out = layout(list, W, H, maxSize, minSize, edge);
     tries++;
   }
 
@@ -644,11 +803,15 @@ function addLocal(word){
 }
 
 function submitWords(raw){
-  var parts = raw.split(/[,，、\n\r]+/)
-    .map(function(s){ return s.trim().replace(/\s+/g, ' '); })
+  return submitList(String(raw).split(/[,，、\n\r]+/));
+}
+
+function submitList(list){
+  var parts = list
+    .map(function(s){ return String(s).trim().replace(/\s+/g, ' '); })
     .filter(function(s){ return s.length > 0 && s.length <= 30; });
   if (!parts.length) return Promise.resolve();
-  if (parts.length > 10) parts = parts.slice(0, 10);
+  if (parts.length > MAX_BATCH) parts = parts.slice(0, MAX_BATCH);
 
   var fresh = new Set(parts);
   var done = function(){
@@ -858,14 +1021,77 @@ function drawQr(){
 /* ============================================================
    介面事件
    ============================================================ */
+/* ---------- 關鍵字確認面板 ---------- */
+var suggested = [];       // [{word, on}]
+var suggestSource = '';   // 原始輸入，按取消時還回輸入框
+
+function renderChips(){
+  var box = $('suggestChips');
+  box.innerHTML = '';
+  suggested.forEach(function(item){
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip-word' + (item.on ? '' : ' off');
+    b.textContent = item.word;
+    b.setAttribute('aria-pressed', item.on ? 'true' : 'false');
+    b.addEventListener('click', function(){ item.on = !item.on; renderChips(); });
+    box.appendChild(b);
+  });
+  var n = suggested.filter(function(i){ return i.on; }).length;
+  $('suggestAdd').textContent = n ? ('加入 ' + n + ' 個詞') : '加入';
+  $('suggestAdd').disabled = n === 0;
+  $('suggestCount').textContent = '共抓到 ' + suggested.length + ' 個';
+}
+
+function openSuggest(words, source){
+  suggested = words.map(function(w){ return { word: w, on: true }; });
+  suggestSource = source;
+  renderChips();
+  $('suggestPanel').hidden = false;
+}
+
+function closeSuggest(){
+  $('suggestPanel').hidden = true;
+  suggested = [];
+  suggestSource = '';
+}
+
+$('suggestAdd').addEventListener('click', function(){
+  var picked = suggested.filter(function(i){ return i.on; }).map(function(i){ return i.word; });
+  if (!picked.length) return;
+  closeSuggest();
+  submitList(picked);
+  $('wordInput').focus();
+});
+
+$('suggestCancel').addEventListener('click', function(){
+  $('wordInput').value = suggestSource;
+  closeSuggest();
+  $('wordInput').focus();
+});
+
 $('wordForm').addEventListener('submit', function(e){
   e.preventDefault();
   var input = $('wordInput');
   var val = input.value.trim();
   if (!val){ input.focus(); return; }
+
+  // 一個短詞就直接送；一整段話先拆成關鍵字讓使用者確認
+  if (isSimpleTerm(val)){
+    input.value = '';
+    input.focus();
+    closeSuggest();
+    submitWords(val);
+    return;
+  }
+
+  var words = extractKeywords(val);
+  if (!words.length){
+    toast('這段文字裡沒抓到關鍵字，換個說法試試', true);
+    return;
+  }
   input.value = '';
-  input.focus();
-  submitWords(val);
+  openSuggest(words, val);
 });
 
 if (isAdmin){
@@ -915,14 +1141,23 @@ if (isAdmin){
 }
 
 document.addEventListener('keydown', function(e){
-  if (e.key === 'Escape') $('qrPanel').classList.remove('show');
+  if (e.key !== 'Escape') return;
+  $('qrPanel').classList.remove('show');
+  if (!$('suggestPanel').hidden) $('suggestCancel').click();
 });
 
 var resizeTimer;
-window.addEventListener('resize', function(){
+function relayoutSoon(delay){
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(function(){ render(); }, 220);
-});
+  resizeTimer = setTimeout(function(){ render(); }, delay || 220);
+}
+window.addEventListener('resize', function(){ relayoutSoon(220); });
+
+/* 舞台高度不是只有視窗縮放會變 —— 關鍵字面板一展開就會把舞台壓矮，
+   底下的字會被切掉。直接盯著舞台本身的尺寸，變了就重排。 */
+if (window.ResizeObserver){
+  new ResizeObserver(function(){ relayoutSoon(160); }).observe(cloudEl);
+}
 
 // 分頁被切到背景時瀏覽器會凍結動畫，回到前景時把殘留的進場狀態清掉並重排，
 // 避免出現「明明有詞卻一片空白」的情況。
