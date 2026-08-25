@@ -209,6 +209,23 @@
   .toast.show{opacity:1;transform:translate(-50%,0)}
   .toast.warn{background:var(--brand-deep);border-color:var(--brand-deep)}
 
+  /* ---------- 學生端 / 管理端分流 ---------- */
+  .student-only{display:none}
+  body.is-student .student-only{display:block}
+  body.is-student .admin-only{display:none}
+  body.is-student .actions,body.is-student .admin{display:none}
+  /* 學生只有一件事要做：把想法打進去，所以輸入框放大 */
+  body.is-student .composer input{font-size:18px;padding:16px 18px}
+  body.is-student .composer form .btn{padding:0 26px;font-size:17px}
+  .student-hint{margin:11px 0 0;font-size:13px;color:var(--ink-soft);letter-spacing:.03em;line-height:1.7}
+  body.is-student .metabar{margin-top:8px}
+
+  /* 揭曉鈕：已揭曉時轉成墨色，狀態一眼可辨 */
+  .btn.reveal{letter-spacing:.06em}
+  .btn.reveal.on{background:var(--ink);border-color:var(--ink);color:var(--paper);
+    box-shadow:0 4px 12px -6px rgba(43,37,35,.7)}
+  .btn.reveal.on:hover{background:#3D3532;border-color:#3D3532}
+
   /* ---------- 投影模式 ---------- */
   body.project .composer,body.project .admin{display:none}
   body.project .topbar{opacity:.3;transition:opacity .3s}
@@ -250,7 +267,8 @@
       <span class="chip" id="roomChip">主題：<b>—</b></span>
     </div>
     <div class="actions">
-      <button class="btn primary" id="toggleCloud">隱藏文字雲</button>
+      <button class="btn primary reveal" id="revealBtn">一鍵揭曉</button>
+      <button class="btn" id="previewBtn">預覽</button>
       <button class="btn" id="toggleQr">QR Code</button>
       <button class="btn" id="projectBtn">投影模式</button>
     </div>
@@ -261,13 +279,16 @@
 
     <div class="overlay" id="emptyState">
       <div class="big">還沒有任何詞彙</div>
-      <div class="sub">在下面的輸入框打一個詞、按 Enter，它就會浮上來。<br>同一個詞被越多人送出，字就會長得越大。</div>
+      <div class="sub admin-only">在下面的輸入框打一個詞、按 Enter，它就會浮上來。<br>同一個詞被越多人送出，字就會長得越大。</div>
+      <div class="sub student-only">在下面打下你的想法，按 Enter 送出。</div>
     </div>
 
     <div class="overlay" id="hiddenState">
-      <div class="sub">目前已收集</div>
+      <div class="sub admin-only">目前已收集</div>
+      <div class="sub student-only">大家已經送出</div>
       <div class="counter" id="hiddenCount">0</div>
-      <div class="sub">文字雲已隱藏，大家可以繼續投稿。<br>按上方「顯示文字雲」一次揭曉。</div>
+      <div class="sub admin-only">學生端現在還看不到文字雲。<br>按上方「一鍵揭曉」，全班的畫面會同時亮起來。</div>
+      <div class="sub student-only">你的想法已經收到了。<br>等老師按下揭曉，大家的文字雲就會出現。</div>
     </div>
   </main>
 
@@ -282,6 +303,7 @@
       <input id="wordInput" maxlength="30" placeholder="輸入一個詞，按 Enter 送出（可用逗號一次送多個）" enterkeyhint="send">
       <button class="btn primary" type="submit">加入</button>
     </form>
+    <p class="student-hint student-only">想到什麼就打什麼，可以一直送。老師揭曉之後，上面就會出現全班的文字雲。</p>
     <div class="metabar">
       <span id="stats">載入中…</span>
       <span class="sep">·</span>
@@ -321,6 +343,7 @@ var QRCode;!function(){function a(a){this.mode=c.MODE_8BIT_BYTE,this.data=a,this
 var SUPABASE_URL = 'https://qdpklfsrgdtgbsutckib.supabase.co';
 var SUPABASE_KEY = 'sb_publishable_e1XwlArxGr9KKwOtIsGDwQ_4I17iX4F';
 var TABLE        = 'wordcloud_entries';
+var ROOMS        = 'wordcloud_rooms';   // 每個主題一列，存「揭曉了沒」
 var MAX_WORDS    = 200;   // 畫面上最多嘗試排入幾個「不同的詞」
 var MAX_ROWS     = 1000;  // 一個主題最多讀幾筆（PostgREST 單次上限就是 1000）
 
@@ -344,7 +367,8 @@ var params  = new URLSearchParams(location.search);
 var room    = (params.get('room') || 'default').slice(0, 40);
 var isAdmin = params.get('admin') === '1';
 var entries = [];              // [{id, word}]
-var cloudVisible = true;
+var revealed = false;          // 全班共用：老師按下揭曉才會變 true，走 Realtime 推到每支手機
+var preview  = false;          // 只有管理端有：揭曉前先自己看一眼，學生端不受影響
 var online = false;
 var sb = null;
 var nodes = new Map();         // word -> element
@@ -474,6 +498,33 @@ function layout(list, W, H, maxSize, minSize){
 /* ============================================================
    繪製
    ============================================================ */
+function clearNodes(){
+  nodes.forEach(function(el){ el.remove(); });
+  nodes.clear();
+}
+
+/* 這台裝置該不該顯示文字雲。
+   學生端只看全班共用的 revealed；管理端多一個自己的預覽開關。 */
+function cloudShown(){ return revealed || (isAdmin && preview); }
+
+/* 兩端看到的統計不同：學生只需要知道「大家送了幾個、我送了幾個」，
+   詞數細節是老師在意的事，不該在揭曉前洩漏給學生。 */
+function updateStats(counts, placed){
+  var el = $('stats');
+  if (!entries.length){
+    el.textContent = isAdmin ? '還沒有人投稿' : '還沒有人送出想法';
+    return;
+  }
+  if (!isAdmin){
+    el.textContent = '全班已經送出 ' + entries.length + ' 個想法'
+      + (mine.length ? '　·　你送出了 ' + mine.length + ' 個' : '');
+    return;
+  }
+  el.textContent = '共 ' + entries.length + ' 筆投稿 · ' + counts.size + ' 個不同的詞'
+    + (placed !== null && placed < counts.size
+        ? '（畫面放得下最熱門的 ' + placed + ' 個）' : '');
+}
+
 function render(highlight){
   var counts = new Map();
   for (var i = 0; i < entries.length; i++){
@@ -486,18 +537,14 @@ function render(highlight){
   list.sort(function(a, b){ return b.n - a.n || a.text.localeCompare(b.text, 'zh-Hant'); });
   if (list.length > MAX_WORDS) list = list.slice(0, MAX_WORDS);
 
-  $('stats').textContent = entries.length
-    ? ('共 ' + entries.length + ' 筆投稿 · ' + counts.size + ' 個不同的詞')
-    : '還沒有人投稿';
+  var shown = cloudShown();
+  updateStats(counts, null);
   $('hiddenCount').textContent = String(entries.length);
-  $('emptyState').classList.toggle('show', list.length === 0 && cloudVisible);
-  $('hiddenState').classList.toggle('show', !cloudVisible);
+  $('emptyState').classList.toggle('show', list.length === 0 && shown);
+  $('hiddenState').classList.toggle('show', !shown);
 
-  if (!list.length){
-    nodes.forEach(function(el){ el.remove(); });
-    nodes.clear();
-    return;
-  }
+  // 還沒揭曉就不排版：學生手機不用白算，而且揭曉那一刻所有詞會一起飛進來
+  if (!shown || !list.length){ clearNodes(); return; }
 
   var W = cloudEl.clientWidth, H = cloudEl.clientHeight;
   if (W < 40 || H < 40) return;
@@ -517,8 +564,7 @@ function render(highlight){
   }
 
   // 詞太多時畫面塞不下所有詞，明講放進去幾個，不要默默吞掉
-  $('stats').textContent = '共 ' + entries.length + ' 筆投稿 · ' + counts.size + ' 個不同的詞'
-    + (out.length < counts.size ? '（畫面放得下最熱門的 ' + out.length + ' 個）' : '');
+  updateStats(counts, out.length);
 
   var seen = new Set();
   out.forEach(function(w, rank){
@@ -661,6 +707,41 @@ function clearRoom(){
   }
 }
 
+/* ---------- 揭曉狀態：全班共用，只有管理端能改 ---------- */
+function syncView(){
+  cloudEl.classList.toggle('is-hidden', !cloudShown());
+  if (isAdmin){
+    var rb = $('revealBtn');
+    rb.textContent = revealed ? '收回文字雲' : '一鍵揭曉';
+    rb.classList.toggle('on', revealed);
+    var pb = $('previewBtn');
+    pb.style.display = revealed ? 'none' : '';   // 已揭曉就不需要預覽了
+    pb.textContent = preview ? '結束預覽' : '預覽';
+  }
+  render();
+}
+
+function setRevealed(v){
+  revealed = v;
+  if (v) preview = false;
+  syncView();
+  toast(v ? '已揭曉 · 全班的畫面同時出現文字雲' : '已收回 · 學生端看不到文字雲了');
+  if (online){
+    sb.from(ROOMS).upsert({ room: room, revealed: v, updated_at: new Date().toISOString() })
+      .then(function(res){
+        if (res.error) toast('揭曉狀態沒同步出去：' + res.error.message, true);
+      });
+  }
+}
+
+function fetchRoomState(){
+  return sb.from(ROOMS).select('revealed').eq('room', room).maybeSingle()
+    .then(function(res){
+      if (res.error) throw res.error;
+      revealed = !!(res.data && res.data.revealed);
+    });
+}
+
 function fetchAll(){
   // 由新到舊取最多 MAX_ROWS 筆：萬一某個主題累積超過上限，
   // 留下的會是最近的投稿，而不是被凍結在最早的那一批。
@@ -679,9 +760,20 @@ function connect(){
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
     realtime: { params: { eventsPerSecond: 20 } }
   });
-  return fetchAll().then(function(){
+  return Promise.all([fetchAll(), fetchRoomState()]).then(function(){
     online = true;
     sb.channel('wordcloud:' + room)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: ROOMS, filter: 'room=eq.' + room },
+        function(payload){
+          // 老師在別台裝置按下揭曉，這裡就會收到
+          var r = payload['new'];
+          if (!r || !!r.revealed === revealed) return;
+          revealed = !!r.revealed;
+          if (revealed) preview = false;
+          syncView();
+          if (!isAdmin && revealed) toast('文字雲揭曉了！');
+        })
       .on('postgres_changes',
         { event: 'INSERT', schema: 'public', table: TABLE, filter: 'room=eq.' + room },
         function(payload){
@@ -766,13 +858,10 @@ $('wordForm').addEventListener('submit', function(e){
   submitWords(val);
 });
 
-$('toggleCloud').addEventListener('click', function(){
-  cloudVisible = !cloudVisible;
-  cloudEl.classList.toggle('is-hidden', !cloudVisible);
-  this.textContent = cloudVisible ? '隱藏文字雲' : '顯示文字雲';
-  render();
-  if (cloudVisible) setTimeout(render, 60);
-});
+if (isAdmin){
+  $('revealBtn').addEventListener('click', function(){ setRevealed(!revealed); });
+  $('previewBtn').addEventListener('click', function(){ preview = !preview; syncView(); });
+}
 
 $('toggleQr').addEventListener('click', function(){
   var p = $('qrPanel');
@@ -837,6 +926,7 @@ document.addEventListener('visibilitychange', function(){
 /* ============================================================
    啟動
    ============================================================ */
+document.body.classList.toggle('is-student', !isAdmin);
 $('roomChip').innerHTML = '主題：<b></b>';
 $('roomChip').querySelector('b').textContent = room;
 document.title = (room === 'default') ? '互動文字雲' : ('互動文字雲 · ' + room);
@@ -844,17 +934,17 @@ document.title = (room === 'default') ? '互動文字雲' : ('互動文字雲 ·
 function boot(){
   if (booted) return;
   booted = true;
-  render();
+  syncView();
   drawQr();
   connect().then(function(){
     refreshUndo();
-    render();
+    syncView();
   }).catch(function(err){
     online = false;
     entries = localLoad();
     setStatus('離線模式（只存在這台裝置）', false);
     refreshUndo();
-    render();
+    syncView();
     console.warn('Supabase 連線失敗，改用本機模式：', err);
   });
 }
