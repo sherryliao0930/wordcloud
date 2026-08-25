@@ -217,8 +217,6 @@
   /* 學生只有一件事要做：把想法打進去，所以輸入框放大 */
   body.is-student .composer input{font-size:18px;padding:16px 18px}
   body.is-student .composer form .btn{padding:0 26px;font-size:17px}
-  .student-hint{margin:11px 0 0;font-size:13px;color:var(--ink-soft);letter-spacing:.03em;line-height:1.7}
-  body.is-student .metabar{margin-top:8px}
 
   /* 揭曉鈕：已揭曉時轉成墨色，狀態一眼可辨 */
   .btn.reveal{letter-spacing:.06em}
@@ -232,6 +230,11 @@
   body.project .topbar:hover{opacity:1}
   body.project .stage{margin-bottom:16px}
 
+  /* 平板直式（iPad 768px）放不下「刊頭 ＋ 四顆按鈕」一整排，讓工具列自己佔一列 */
+  @media (max-width:980px){
+    .actions{width:100%;margin-left:0}
+    .actions .btn{flex:1 1 auto}
+  }
   @media (max-width:820px){
     .rule,.subtitle{display:none}
   }
@@ -245,6 +248,14 @@
     .composer input{font-size:16px;padding:13px 14px}
     .composer form .btn{padding:0 18px}
     .qr{left:12px;right:12px;width:auto}
+  }
+  /* 觸控裝置（平板／手機）：把點擊區拉到手指按得準的高度。
+     只動 min-height，不碰 padding，才不會跟上面各斷點的尺寸打架。 */
+  @media (pointer:coarse){
+    .btn{min-height:44px}
+    .composer input,.composer form .btn{min-height:54px}
+    .admin .btn,.admin input{min-height:40px}
+    .link{display:inline-block;padding:7px 0}
   }
   @media (prefers-reduced-motion:reduce){
     *{animation-duration:.01ms !important;transition-duration:.01ms !important}
@@ -294,8 +305,8 @@
 
   <section class="composer">
     <div class="admin" id="adminBar" style="display:none">
-      <span>🔧 管理模式</span>
-      <input id="roomInput" placeholder="主題代號" maxlength="40">
+      <span>主題名稱</span>
+      <input id="roomInput" placeholder="例如：六年一班" maxlength="40">
       <button class="btn" id="roomGo">切換主題</button>
       <button class="btn danger grow" id="clearBtn">清空這個主題</button>
     </div>
@@ -303,7 +314,6 @@
       <input id="wordInput" maxlength="30" placeholder="輸入一個詞，按 Enter 送出（可用逗號一次送多個）" enterkeyhint="send">
       <button class="btn primary" type="submit">加入</button>
     </form>
-    <p class="student-hint student-only">想到什麼就打什麼，可以一直送。老師揭曉之後，上面就會出現全班的文字雲。</p>
     <div class="metabar">
       <span id="stats">載入中…</span>
       <span class="sep">·</span>
