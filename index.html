@@ -339,7 +339,7 @@
     </div>
     <div class="suggest" id="suggestPanel" hidden>
       <div class="suggest-head">
-        <span class="suggest-title">從你的文字裡抓到這些關鍵字</span>
+        <span class="suggest-title">字數比較多，先幫你抓出關鍵字</span>
         <span class="suggest-hint">點一下可以取消不要的，確認後再按加入</span>
       </div>
       <div class="chips" id="suggestChips"></div>
@@ -351,7 +351,7 @@
     </div>
 
     <form id="wordForm" autocomplete="off">
-      <input id="wordInput" maxlength="200" placeholder="輸入一個詞，或直接打一段話讓系統抓關鍵字" enterkeyhint="send">
+      <input id="wordInput" maxlength="200" placeholder="輸入詞彙，用逗號分隔" enterkeyhint="send">
       <button class="btn primary" type="submit">加入</button>
     </form>
     <div class="metabar">
@@ -484,7 +484,12 @@ var STOPWORDS = (function(){
     '一種 一些 一直 一定 可以 可能 應該 需要 覺得 認為 知道 說 對 把 被 讓 給 從 到 向 往 上 下 中 裡 外 前 後 ' +
     '之 其 此 各 每 才 再 又 已 已經 正在 曾經 常常 總是 非常 比較 有點 一點 大家 自己 別人 東西 事情 時候 ' +
     '地方 樣子 方面 因此 而且 並且 以及 於 由 用 為 之後 之前 的話 吧 呢 嗎 啊 喔 唷 耶 啦 哦 真的 好像 其實 ' +
-    '的是 能夠 進行 想要 去 跟 會 要 能 想 做 來 過 著 們 個 很多 一樣 這裡 那裡 現在 今天 然而 不過 只是 就是';
+    '的是 能夠 進行 想要 去 跟 會 要 能 想 做 來 過 著 們 個 很多 一樣 這裡 那裡 現在 今天 然而 不過 只是 就是 ' +
+    // 常見的贅詞與斷詞碎片：多半沒有意義，卻很容易被抓進候選清單
+    '還要 還會 還能 還有 不可 不會 不能 不要 不是 沒辦法 出來 起來 下去 上去 進去 回來 過來 一起 一下 一次 ' +
+    '先找 找到 看到 聽到 學到 學會 讀完 看完 寫完 聽完 說完 做完 完成 開始 結束 應該 必須 可是 於是 接著 ' +
+    '而已 等等 之類 什麼的 反正 其他 別的 這種 那種 各種 有些 那麼 這麼 如此 比如 例如 譬如 尤其 甚至 幾乎 ' +
+    '大概 也許 或許 當然 果然 竟然 居然 剛剛 馬上 立刻 終於 已經 還是 都是 就會 才會 也會 都會';
   var en = 'the a an and or but of to in on at for with is are was were be been being it its this that these those ' +
     'i you he she we they them my your his her our their as by from not no do does did done have has had can could ' +
     'should would will shall may might must if then than so such very more most much many some any all each every ' +
@@ -579,13 +584,23 @@ function extractKeywords(raw){
   return out.slice(0, MAX_SUGGEST);
 }
 
-/* 短短一個詞就直接送，不要多一道確認拖慢最常見的情況。
-   中文詞通常 2–5 個字，更長的多半是一句話（「我覺得很重要」），那就該拆。 */
-function isSimpleTerm(raw){
-  var t = raw.trim();
-  if (!t) return false;
-  if (/[\s,，、。．.!！?？;；:：]/.test(t)) return false;
-  return CJK_RE.test(t) ? t.length <= 5 : t.length <= 20;
+/* 這個網站以「詞」為主：用逗號分隔的輸入就照原樣送出，不多問一道。
+   只有當某一段超過 LONG_INPUT 個字時（那多半是一句話而不是一個詞），
+   才先拆成關鍵字讓使用者挑。
+
+   門檻是逐段檢查而不是看整串長度 —— 「合作，溝通，耐心，尊重」有 11 個字，
+   但每一段都是乾淨的詞，不該被攔下來多按一次。 */
+var LONG_INPUT = 8;
+
+function isOneWord(part){
+  var t = part.trim();
+  if (!t) return true;
+  if (/^[A-Za-z][A-Za-z''-]*$/.test(t)) return t.length <= 30;  // 單一英文字可以長一點
+  return t.length <= LONG_INPUT;
+}
+
+function needsExtraction(raw){
+  return String(raw).split(/[,，、\n\r]+/).some(function(p){ return !isOneWord(p); });
 }
 
 /* ============================================================
@@ -1076,8 +1091,8 @@ $('wordForm').addEventListener('submit', function(e){
   var val = input.value.trim();
   if (!val){ input.focus(); return; }
 
-  // 一個短詞就直接送；一整段話先拆成關鍵字讓使用者確認
-  if (isSimpleTerm(val)){
+  // 逗號分隔的詞直接送；某一段太長才先拆成關鍵字讓使用者確認
+  if (!needsExtraction(val)){
     input.value = '';
     input.focus();
     closeSuggest();
@@ -1087,7 +1102,7 @@ $('wordForm').addEventListener('submit', function(e){
 
   var words = extractKeywords(val);
   if (!words.length){
-    toast('這段文字裡沒抓到關鍵字，換個說法試試', true);
+    toast('沒抓到可用的關鍵字，試試直接輸入詞彙', true);
     return;
   }
   input.value = '';
