@@ -266,6 +266,22 @@
     box-shadow:0 4px 12px -6px rgba(43,37,35,.7)}
   .btn.reveal.on:hover{background:#3D3532;border-color:#3D3532}
 
+  /* 截止鈕：截止中用實心深紅，跟「可按的動作」明顯區隔 */
+  .btn.lock.on{background:var(--brand-deep);border-color:var(--brand-deep);color:#fff}
+  .btn.lock.on:hover{background:#6A0D12;border-color:#6A0D12}
+
+  /* 截止提示條：只有截止時才出現 */
+  .lock-note{display:none;align-items:center;gap:9px;margin-bottom:11px;
+    padding:11px 14px;border-radius:6px;font-size:13.5px;font-weight:700;
+    background:var(--brand-tint);border:1px solid #E0C6BE;color:var(--brand-deep);
+    line-height:1.6}
+  body.is-locked .lock-note{display:flex}
+  .lock-note-icon{display:grid;place-items:center;flex:0 0 auto;width:20px;height:20px;
+    border-radius:50%;background:var(--brand);color:#fff;font-size:12px;font-weight:700}
+  /* 截止後輸入框整組收起來，不要留一個按不動的框在那裡佔位 */
+  body.is-locked .composer form{display:none}
+  body.is-locked #undoBtn,body.is-locked .metabar .sep:last-of-type{display:none}
+
   /* ---------- 投影模式 ---------- */
   body.project .composer,body.project .admin{display:none}
   body.project .topbar{opacity:.3;transition:opacity .3s}
@@ -327,7 +343,9 @@
     <div class="actions">
       <button class="btn primary reveal" id="revealBtn">一鍵揭曉</button>
       <button class="btn" id="previewBtn">預覽</button>
+      <button class="btn lock" id="lockBtn">截止收件</button>
       <button class="btn" id="toggleQr">QR Code</button>
+      <button class="btn" id="imageBtn">下載圖片</button>
       <button class="btn" id="exportBtn">下載 Excel</button>
       <button class="btn" id="projectBtn">投影模式</button>
     </div>
@@ -352,6 +370,11 @@
   </main>
 
   <section class="composer">
+    <div class="lock-note" id="lockNote">
+      <span class="lock-note-icon" aria-hidden="true">✓</span>
+      <span class="admin-only">已截止收件，全班都不能再送出。按上方「重新開放」可以解除。</span>
+      <span class="student-only">老師已經截止收件了，謝謝你的想法！</span>
+    </div>
     <div class="admin" id="adminBar" style="display:none">
       <span>主題名稱</span>
       <input id="roomInput" placeholder="例如：六年一班" maxlength="40">
@@ -451,6 +474,7 @@ var room    = (params.get('room') || 'default').slice(0, 40);
 var isAdmin = params.get('admin') === '1';
 var entries = [];              // [{id, word}]
 var revealed = false;          // 全班共用：老師按下揭曉才會變 true，走 Realtime 推到每支手機
+var locked   = false;          // 全班共用：截止收件。資料庫的 RLS 也會擋，不是只把按鈕變灰
 var preview  = false;          // 只有管理端有：揭曉前先自己看一眼，學生端不受影響
 var online = false;
 var sb = null;
@@ -926,9 +950,21 @@ function clearRoom(){
   }
 }
 
-/* ---------- 揭曉狀態：全班共用，只有管理端能改 ---------- */
+/* ---------- 揭曉／截止狀態：全班共用，只有管理端能改 ---------- */
 function syncView(){
   cloudEl.classList.toggle('is-hidden', !cloudShown());
+  document.body.classList.toggle('is-locked', locked);
+
+  // 截止後把輸入整組停掉，連「撤回」也一起鎖（收件都結束了就不該再變動）
+  $('wordInput').disabled = locked;
+  $('wordForm').querySelector('button[type="submit"]').disabled = locked;
+  if (locked){
+    closeSuggest();
+    $('undoBtn').disabled = true;
+  } else {
+    refreshUndo();
+  }
+
   if (isAdmin){
     var rb = $('revealBtn');
     rb.textContent = revealed ? '收回文字雲' : '一鍵揭曉';
@@ -936,8 +972,21 @@ function syncView(){
     var pb = $('previewBtn');
     pb.style.display = revealed ? 'none' : '';   // 已揭曉就不需要預覽了
     pb.textContent = preview ? '結束預覽' : '預覽';
+    var lb = $('lockBtn');
+    lb.textContent = locked ? '重新開放' : '截止收件';
+    lb.classList.toggle('on', locked);
   }
   render();
+}
+
+function pushRoomState(patch, failMsg){
+  if (!online) return;
+  var row = { room: room, revealed: revealed, locked: locked,
+              updated_at: new Date().toISOString() };
+  for (var k in patch) row[k] = patch[k];
+  sb.from(ROOMS).upsert(row).then(function(res){
+    if (res.error) toast(failMsg + '：' + res.error.message, true);
+  });
 }
 
 function setRevealed(v){
@@ -945,19 +994,22 @@ function setRevealed(v){
   if (v) preview = false;
   syncView();
   toast(v ? '已揭曉 · 全班的畫面同時出現文字雲' : '已收回 · 學生端看不到文字雲了');
-  if (online){
-    sb.from(ROOMS).upsert({ room: room, revealed: v, updated_at: new Date().toISOString() })
-      .then(function(res){
-        if (res.error) toast('揭曉狀態沒同步出去：' + res.error.message, true);
-      });
-  }
+  pushRoomState({ revealed: v }, '揭曉狀態沒同步出去');
+}
+
+function setLocked(v){
+  locked = v;
+  syncView();
+  toast(v ? '已截止 · 全班都不能再送出了' : '已重新開放 · 大家可以繼續送出');
+  pushRoomState({ locked: v }, '截止狀態沒同步出去');
 }
 
 function fetchRoomState(){
-  return sb.from(ROOMS).select('revealed').eq('room', room).maybeSingle()
+  return sb.from(ROOMS).select('revealed,locked').eq('room', room).maybeSingle()
     .then(function(res){
       if (res.error) throw res.error;
       revealed = !!(res.data && res.data.revealed);
+      locked   = !!(res.data && res.data.locked);
     });
 }
 
@@ -985,13 +1037,21 @@ function connect(){
       .on('postgres_changes',
         { event: '*', schema: 'public', table: ROOMS, filter: 'room=eq.' + room },
         function(payload){
-          // 老師在別台裝置按下揭曉，這裡就會收到
+          // 老師在別台裝置按下揭曉或截止，這裡就會收到
           var r = payload['new'];
-          if (!r || !!r.revealed === revealed) return;
-          revealed = !!r.revealed;
+          if (!r) return;
+          var newReveal = !!r.revealed, newLock = !!r.locked;
+          if (newReveal === revealed && newLock === locked) return;
+          var revealChanged = newReveal !== revealed, lockChanged = newLock !== locked;
+          revealed = newReveal;
+          locked = newLock;
           if (revealed) preview = false;
           syncView();
-          if (!isAdmin && revealed) toast('文字雲揭曉了！');
+          if (!isAdmin){
+            if (lockChanged && locked) toast('老師已截止收件');
+            else if (lockChanged && !locked) toast('重新開放了，可以繼續送出');
+            else if (revealChanged && revealed) toast('文字雲揭曉了！');
+          }
         })
       .on('postgres_changes',
         { event: 'INSERT', schema: 'public', table: TABLE, filter: 'room=eq.' + room },
@@ -1184,6 +1244,114 @@ function buildWorkbook(sheets){
   return makeZip(files);
 }
 
+function downloadBlob(blob, filename){
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+}
+
+function fileStamp(){
+  var d = new Date();
+  function p(n){ return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) +
+         '_' + p(d.getHours()) + p(d.getMinutes());
+}
+
+function safeRoomName(){ return room.replace(/[\\/:*?"<>|]/g, '_'); }
+
+/* ============================================================
+   把文字雲存成 JPG
+
+   不是截圖，是照著畫面上每個詞的實際位置、字級、字重、顏色
+   在 canvas 上重畫一次，所以輸出是 3 倍解析度的清晰圖，
+   不會有螢幕截圖那種鋸齒。
+   ============================================================ */
+function exportImage(){
+  if (!cloudShown()){
+    toast('文字雲還沒顯示 —— 先按「預覽」或「一鍵揭曉」', true);
+    return;
+  }
+  var words = [].slice.call(cloudEl.querySelectorAll('.word'));
+  if (!words.length){ toast('目前沒有詞可以存成圖片', true); return; }
+
+  var btn = $('imageBtn');
+  var original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '產生中…';
+  var restore = function(){ btn.disabled = false; btn.textContent = original; };
+
+  try {
+    var W = cloudEl.clientWidth, H = cloudEl.clientHeight;
+    var SCALE = 3;
+    var FOOTER = 46;                     // 底下留一條寫主題與日期
+
+    var cv = document.createElement('canvas');
+    cv.width  = Math.round(W * SCALE);
+    cv.height = Math.round((H + FOOTER) * SCALE);
+    var g = cv.getContext('2d');
+    g.scale(SCALE, SCALE);
+
+    // JPG 沒有透明度，底色一定要自己鋪，否則會變黑底
+    var stageBg = getComputedStyle(document.querySelector('.stage')).backgroundColor;
+    g.fillStyle = (stageBg && stageBg !== 'rgba(0, 0, 0, 0)') ? stageBg : '#FDFAF3';
+    g.fillRect(0, 0, W, H + FOOTER);
+
+    words.forEach(function(el){
+      var cs = getComputedStyle(el);
+      var size = parseFloat(cs.fontSize);
+      var x = el.offsetLeft, y = el.offsetTop;
+      var w = el.offsetWidth, h = el.offsetHeight;
+
+      g.save();
+      g.globalAlpha = parseFloat(cs.opacity) || 1;
+      g.fillStyle = cs.color;
+      g.font = cs.fontWeight + ' ' + size + 'px "Noto Serif TC","Songti TC",serif';
+      g.textBaseline = 'middle';
+
+      if (el.classList.contains('v')){
+        // 直排：逐字往下疊，每個字佔一格
+        var chars = el.textContent.split('');
+        var step = h / chars.length;
+        g.textAlign = 'center';
+        chars.forEach(function(ch, i){
+          g.fillText(ch, x + w / 2, y + step * (i + 0.5));
+        });
+      } else {
+        g.textAlign = 'left';
+        g.fillText(el.textContent, x, y + h / 2);
+      }
+      g.restore();
+    });
+
+    var d = new Date();
+    function p(n){ return (n < 10 ? '0' : '') + n; }
+    g.globalAlpha = 1;
+    g.fillStyle = '#6E6258';
+    g.font = '500 14px "Noto Sans TC",sans-serif';
+    g.textBaseline = 'middle';
+    g.textAlign = 'left';
+    g.fillText('主題：' + room, 6, H + FOOTER / 2);
+    g.textAlign = 'right';
+    g.fillText(d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+               '　共 ' + entries.length + ' 筆投稿', W - 6, H + FOOTER / 2);
+
+    cv.toBlob(function(blob){
+      if (!blob){ toast('圖片產生失敗', true); restore(); return; }
+      downloadBlob(blob, '文字雲_' + safeRoomName() + '_' + fileStamp() + '.jpg');
+      toast('已下載文字雲圖片');
+      restore();
+    }, 'image/jpeg', 0.92);
+  } catch (err){
+    toast('圖片產生失敗：' + (err && err.message ? err.message : err), true);
+    restore();
+  }
+}
+
 function localTime(iso){
   if (!iso) return '';
   var d = new Date(iso);
@@ -1246,20 +1414,7 @@ function exportExcel(){
       { name: '原始資料', rows: raw }
     ]);
 
-    var now = new Date();
-    function p(n){ return (n < 10 ? '0' : '') + n; }
-    var stamp = now.getFullYear() + p(now.getMonth() + 1) + p(now.getDate()) +
-                '_' + p(now.getHours()) + p(now.getMinutes());
-    var safeRoom = room.replace(/[\\/:*?"<>|]/g, '_');
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = '文字雲_' + safeRoom + '_' + stamp + '.xlsx';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
-
+    downloadBlob(blob, '文字雲_' + safeRoomName() + '_' + fileStamp() + '.xlsx');
     toast('已下載 ' + rows.length + ' 筆資料');
   }).catch(function(err){
     toast('下載失敗：' + (err && err.message ? err.message : err), true);
@@ -1433,6 +1588,7 @@ $('suggestCancel').addEventListener('click', function(){
 
 $('wordForm').addEventListener('submit', function(e){
   e.preventDefault();
+  if (locked){ toast('已經截止收件了', true); return; }
   var input = $('wordInput');
   var val = input.value.trim();
   if (!val){ input.focus(); return; }
@@ -1460,6 +1616,8 @@ $('wordForm').addEventListener('submit', function(e){
 if (isAdmin){
   $('revealBtn').addEventListener('click', function(){ setRevealed(!revealed); });
   $('previewBtn').addEventListener('click', function(){ preview = !preview; syncView(); });
+  $('lockBtn').addEventListener('click', function(){ setLocked(!locked); });
+  $('imageBtn').addEventListener('click', exportImage);
   $('exportBtn').addEventListener('click', exportExcel);
 }
 
